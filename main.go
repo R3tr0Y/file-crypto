@@ -15,30 +15,31 @@ import (
 func main() {
 	var password string
 
-	// 根命令
+	// Root command
 	var rootCmd = &cobra.Command{
 		Use:   "fcypt",
-		Short: "一个简单的文件加解密工具",
+		Short: "A simple file encryption/decryption tool",
+		Long:  `fcypt is a lightweight CLI tool to encrypt and decrypt files using AES-256-GCM.`,
 	}
 
-	// 持久化 Flag（所有子命令通用）
-	rootCmd.PersistentFlags().StringVarP(&password, "pass", "p", "", "用于加密的密码")
+	// Persistent flags
+	rootCmd.PersistentFlags().StringVarP(&password, "pass", "p", "", "Password for encryption/decryption")
 	rootCmd.MarkPersistentFlagRequired("pass")
 
-	// 加密子命令
+	// Encrypt subcommand
 	var encCmd = &cobra.Command{
 		Use:   "enc [file]",
-		Short: "加密一个文件",
+		Short: "Encrypt a file",
 		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			processFile(args[0], password, true)
 		},
 	}
 
-	// 解密子命令
+	// Decrypt subcommand
 	var decCmd = &cobra.Command{
 		Use:   "dec [file]",
-		Short: "解密一个文件",
+		Short: "Decrypt a file",
 		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			processFile(args[0], password, false)
@@ -51,44 +52,66 @@ func main() {
 	}
 }
 
-// processFile 处理文件读写逻辑
+// processFile handles the logic for both encryption and decryption
 func processFile(filename string, password string, encrypt bool) {
-	// 使用 SHA256 将任意长度密码转换为 32 字节 Key (AES-256)
+	// Derive a 32-byte key from the password using SHA256
 	hash := sha256.Sum256([]byte(password))
 	key := hash[:]
 
 	data, err := os.ReadFile(filename)
 	if err != nil {
-		fmt.Printf("错误: 无法读取文件: %v\n", err)
+		fmt.Printf("Error: could not read file: %v\n", err)
 		return
 	}
 
-	block, _ := aes.NewCipher(key)
-	gcm, _ := cipher.NewGCM(block)
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		fmt.Printf("Error: could not create cipher: %v\n", err)
+		return
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		fmt.Printf("Error: could not create GCM: %v\n", err)
+		return
+	}
 
 	if encrypt {
 		nonce := make([]byte, gcm.NonceSize())
-		io.ReadFull(rand.Reader, nonce)
-		// 密文 = nonce + 实际加密内容
+		if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+			fmt.Printf("Error: could not generate nonce: %v\n", err)
+			return
+		}
+
+		// Ciphertext = nonce + sealed data
 		out := gcm.Seal(nonce, nonce, data, nil)
 		newName := filename + ".enc"
-		os.WriteFile(newName, out, 0644)
-		fmt.Printf("成功！文件已加密为: %s\n", newName)
+		err = os.WriteFile(newName, out, 0644)
+		if err != nil {
+			fmt.Printf("Error: could not save encrypted file: %v\n", err)
+			return
+		}
+		fmt.Printf("Success! File encrypted as: %s\n", newName)
 	} else {
 		nonceSize := gcm.NonceSize()
 		if len(data) < nonceSize {
-			fmt.Println("错误: 文件格式不正确")
+			fmt.Println("Error: ciphertext too short or invalid file format")
 			return
 		}
+
 		nonce, ciphertext := data[:nonceSize], data[nonceSize:]
 		plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
 		if err != nil {
-			fmt.Println("解密失败: 密码错误或数据损坏")
+			fmt.Println("Error: decryption failed (wrong password or corrupted data)")
 			return
 		}
-		// 简单处理：解密后尝试移除 .enc 后缀
+
 		newName := "decrypted_" + filename
-		os.WriteFile(newName, plaintext, 0644)
-		fmt.Printf("成功！文件已解密为: %s\n", newName)
+		err = os.WriteFile(newName, plaintext, 0644)
+		if err != nil {
+			fmt.Printf("Error: could not save decrypted file: %v\n", err)
+			return
+		}
+		fmt.Printf("Success! File decrypted as: %s\n", newName)
 	}
 }
