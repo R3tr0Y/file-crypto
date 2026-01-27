@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings" // 1. 引入 strings 包
 
 	"github.com/spf13/cobra"
 )
@@ -15,18 +16,15 @@ import (
 func main() {
 	var password string
 
-	// Root command
 	var rootCmd = &cobra.Command{
-		Use:   "fcypt",
+		Use:   "fcrypt",
 		Short: "A simple file encryption/decryption tool",
-		Long:  `fcypt is a lightweight CLI tool to encrypt and decrypt files using AES-256-GCM.`,
+		Long:  `fcrypt is a lightweight CLI tool to encrypt and decrypt files using AES-256-GCM.`,
 	}
 
-	// Persistent flags
 	rootCmd.PersistentFlags().StringVarP(&password, "pass", "p", "", "Password for encryption/decryption")
 	rootCmd.MarkPersistentFlagRequired("pass")
 
-	// Encrypt subcommand
 	var encCmd = &cobra.Command{
 		Use:   "enc [file]",
 		Short: "Encrypt a file",
@@ -36,7 +34,6 @@ func main() {
 		},
 	}
 
-	// Decrypt subcommand
 	var decCmd = &cobra.Command{
 		Use:   "dec [file]",
 		Short: "Decrypt a file",
@@ -52,9 +49,7 @@ func main() {
 	}
 }
 
-// processFile handles the logic for both encryption and decryption
 func processFile(filename string, password string, encrypt bool) {
-	// Derive a 32-byte key from the password using SHA256
 	hash := sha256.Sum256([]byte(password))
 	key := hash[:]
 
@@ -83,7 +78,6 @@ func processFile(filename string, password string, encrypt bool) {
 			return
 		}
 
-		// Ciphertext = nonce + sealed data
 		out := gcm.Seal(nonce, nonce, data, nil)
 		newName := filename + ".enc"
 		err = os.WriteFile(newName, out, 0644)
@@ -106,7 +100,17 @@ func processFile(filename string, password string, encrypt bool) {
 			return
 		}
 
-		newName := "decrypted_" + filename
+		// --- 修改部分开始 ---
+		var newName string
+		if strings.HasSuffix(filename, ".enc") {
+			// 如果文件名以 .enc 结尾，则去掉它
+			newName = strings.TrimSuffix(filename, ".enc")
+		} else {
+			// 如果不是，则加上 decrypted_ 前缀防止覆盖原文件
+			newName = "decrypted_" + filename
+		}
+		// --- 修改部分结束 ---
+
 		err = os.WriteFile(newName, plaintext, 0644)
 		if err != nil {
 			fmt.Printf("Error: could not save decrypted file: %v\n", err)
