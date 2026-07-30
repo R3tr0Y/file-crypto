@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath" // 用于处理通配符
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -16,7 +16,9 @@ import (
 
 func main() {
 	var password string
-	var removeSource bool // 新增 flag 变量
+	var removeSource bool
+	var recursive bool
+	var all bool
 
 	var rootCmd = &cobra.Command{
 		Use:   "fcrypt",
@@ -24,28 +26,27 @@ func main() {
 		Long:  `fcrypt is a lightweight CLI tool to encrypt and decrypt files using AES-256-GCM. Supports wildcards like *.txt`,
 	}
 
-	// 全局 Flag
 	rootCmd.PersistentFlags().StringVarP(&password, "pass", "p", "", "Password for encryption/decryption")
 	rootCmd.PersistentFlags().BoolVarP(&removeSource, "remove", "r", false, "Remove source file after successful processing")
+	rootCmd.PersistentFlags().BoolVarP(&recursive, "recursive", "R", false, "Recursively traverse subdirectories")
+	rootCmd.PersistentFlags().BoolVarP(&all, "all", "a", false, "Process all files in directory (encrypt: skip .enc; decrypt: only .enc)")
 	rootCmd.MarkPersistentFlagRequired("pass")
 
-	// 加密命令
 	var encCmd = &cobra.Command{
-		Use:   "enc [pattern]",
-		Short: "Encrypt files (supports wildcards)",
-		Args:  cobra.ExactArgs(1),
+		Use:   "enc <files|dirs|patterns>...",
+		Short: "Encrypt files (supports wildcards, multiple targets)",
+		Args:  cobra.MinimumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
-			handleBatch(args[0], password, true, removeSource)
+			handleCommand(args, password, true, removeSource, recursive, all)
 		},
 	}
 
-	// 解密命令
 	var decCmd = &cobra.Command{
-		Use:   "dec [pattern]",
-		Short: "Decrypt files (supports wildcards)",
-		Args:  cobra.ExactArgs(1),
+		Use:   "dec <files|dirs|patterns>...",
+		Short: "Decrypt files (supports wildcards, multiple targets)",
+		Args:  cobra.MinimumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
-			handleBatch(args[0], password, false, removeSource)
+			handleCommand(args, password, false, removeSource, recursive, all)
 		},
 	}
 
@@ -55,29 +56,45 @@ func main() {
 	}
 }
 
-// handleBatch 处理通配符匹配并循环调用处理函数
-func handleBatch(pattern string, password string, encrypt bool, removeSource bool) {
-	// 1. 解析通配符
-	files, err := filepath.Glob(pattern)
-	if err != nil {
-		fmt.Printf("Error: Invalid pattern: %v\n", err)
-		return
+func handleCommand(args []string, password string, encrypt, removeSource, recursive, all bool) {
+	var files []string
+
+	for _, arg := range args {
+		info, err := os.Stat(arg)
+
+		if err == nil && info.IsDir() {
+			if !all {
+				fmt.Printf("Error: '%s' is a directory, use -a to process all files\n", arg)
+				continue
+			}
+			files = append(files, collectDirFiles(arg, recursive, encrypt)...)
+		} else if hasGlobChars(arg) {
+			if recursive {
+				files = append(files, recursiveGlob(arg)...)
+			} else {
+				matched, gerr := filepath.Glob(arg)
+				if gerr != nil {
+					fmt.Printf("Error: invalid pattern '%s': %v\n", arg, gerr)
+					continue
+				}
+				for _, f := range matched {
+					if fi, e := os.Stat(f); e == nil && !fi.IsDir() {
+						files = append(files, f)
+					}
+				}
+			}
+		} else {
+			files = append(files, arg)
+		}
 	}
 
 	if len(files) == 0 {
-		fmt.Println("No files matched the pattern.")
+		fmt.Println("No matching files found.")
 		return
 	}
 
 	for _, file := range files {
-		// 跳过文件夹
-		info, err := os.Stat(file)
-		if err != nil || info.IsDir() {
-			continue
-		}
-
-		// 2. 执行加解密
-		err = processFile(file, password, encrypt, removeSource)
+		err := processFile(file, password, encrypt, removeSource)
 		if err != nil {
 			fmt.Printf("[-] Failed [%s]: %v\n", file, err)
 		} else {
@@ -88,6 +105,68 @@ func handleBatch(pattern string, password string, encrypt bool, removeSource boo
 			fmt.Printf("[+] %s: %s\n", action, file)
 		}
 	}
+}
+
+func hasGlobChars(s string) bool {
+	return strings.ContainsAny(s, "*?[")
+}
+
+func recursiveGlob(pattern string) []string {
+	pattern = filepath.FromSlash(pattern)
+	root := filepath.Dir(pattern)
+	if root == "" {
+		root = "."
+	}
+
+	dirPart := filepath.Dir(pattern)
+	basePart := filepath.Base(pattern)
+
+	var files []string
+	filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+
+		matched, _ := filepath.Match(basePart, d.Name())
+		if !matched {
+			return nil
+		}
+
+		if dirPart != "." && dirPart != "" {
+			prefix := dirPart + string(filepath.Separator)
+			if !strings.HasPrefix(p, prefix) && p != dirPart {
+				return nil
+			}
+		}
+
+		files = append(files, p)
+		return nil
+	})
+	return files
+}
+
+func collectDirFiles(root string, recursive bool, encrypt bool) []string {
+	var files []string
+	filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if !recursive && p != root {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if encrypt && strings.HasSuffix(p, ".enc") {
+			return nil
+		}
+		if !encrypt && !strings.HasSuffix(p, ".enc") {
+			return nil
+		}
+		files = append(files, p)
+		return nil
+	})
+	return files
 }
 
 func processFile(filename string, password string, encrypt bool, removeSource bool) error {
